@@ -15,7 +15,7 @@ const DEFAULT_MENTION = `<@${process.env.SLACK_MENTION || "W55E036Q7"}>` // @all
 const MAP_ACTIONS0 = {
   "ciddread@us.ibm.com": {mention: "<!subteam^SCSNVULBD>", notify: 3, cleanup: 4}, // need group id
   "c3cvt3vm@ca.ibm.com": {mention: "<!subteam^SN8N9QUF9>", notify: 8}, // need group id
-  "unknown@ibm.com": {mention: DEFAULT_MENTION, notify: 4}
+  "unknown@ibm.com": {mention: DEFAULT_MENTION, notify: 24}
 }
 const REGIONS = (process.env.IBM_CLOUD_REGIONS || "ca-tor,us-east,us-south").split(",")
 const MAP_ACTIONS = Object.assign({}, MAP_ACTIONS0)
@@ -48,23 +48,15 @@ const text = computed(() => `${subject.value}\n\`\`\`\n${code.value}\n\`\`\`\n`)
 // compute all active clusters
 const clusters_active = computed(() => {
   console.log(`... ibm_ks_clusters changed, calculating clusters active`)
-  ibm_ks_clusters.value
-    .forEach(cluster => {
-      cluster.spending = cluster.hasOwnProperty("spending_env") ? cluster.spending_env : "test"
-      cluster.owner = cluster.hasOwnProperty("owner") ? cluster.owner : "unknown"
-      cluster.instances = cluster.hasOwnProperty("workerCount") ? cluster.workerCount : 1
-      cluster.type = cluster.worker_pool.at(0).hasOwnProperty("machineType") ? cluster.worker_pool.at(0).machineType : cluster.worker_pool.at(0).hasOwnProperty("flavor") ? cluster.worker_pool.at(0).flavor : "unknown"
-      cluster.vpc = cluster.worker_pool.at(0).hasOwnProperty("vpcID") ? cluster.worker_pool.at(0).vpcID : "classic"
-    })
   return ibm_ks_clusters.value
     .map(cluster => ({
       name: cluster.name,
-      owner: cluster.owner,
       launch: cluster.createdDate,
-      vpc: cluster.vpc,
-      type: cluster.type.replace(/.encrypted/i, ""),
-      spending: cluster.spending,
-      instances: cluster.instances
+      instances: cluster.hasOwnProperty("workerCount") ? cluster.workerCount : 1,
+      type: (cluster.worker_pool.at(0).hasOwnProperty("machineType") ? cluster.worker_pool.at(0).machineType : cluster.worker_pool.at(0).hasOwnProperty("flavor") ? cluster.worker_pool.at(0).flavor : "unknown").replace(/.encrypted/i, ""),
+      vpc: cluster.worker_pool.at(0).hasOwnProperty("vpcID") ? cluster.worker_pool.at(0).vpcID : "classic",
+      spending: spending_of_cluster(cluster),
+      owner: owner_of_cluster(cluster)
     }))
   }
 )
@@ -177,9 +169,6 @@ async function status(url_addr="http://127.0.0.1:3000", timeout=20) {
     const result = await execa.command('curl localhost:3000', {shell: true})
     console.log(JSON.parse(result.stdout))
     // console.log(clusters_active.value)
-    console.log(code.value)
-    console.log(code_status.value)
-    console.log(ibm_tags.value)
   } catch (e) {}
 }
 
@@ -230,6 +219,19 @@ const async_query_tags = async () => {
       try {
         const query = await execa.command(`ibmcloud resource search 'tags:"${tag.name}"' --output json`, {shell: true})
         tag.items = JSON.parse(query.stdout).items.filter(item => /k8-cluster/.test(item.type))
+        // if tag is on a cluster, update ibm_ks_clusters tags property
+        tag.items.forEach(item => {
+          const cluster = ibm_ks_clusters.value.find(c => c.name === item.name)
+          if (cluster) {
+            if (cluster.hasOwnProperty("tags")) {
+              if (cluster.tags.findIndex(t => t === tag.name) === -1) {
+                cluster.tags.push(tag.name) // add tag if not exists
+              }
+            } else {
+              cluster.tags = [tag.name] // add .tags property
+            }
+          }
+        })
         if (tag.new_tag) {
           ibm_tags.value.unshift(tag)
         } else {
@@ -255,9 +257,12 @@ const async_query_clusters = async () => {
         const query = await execa.command(`ibmcloud ks worker-pool ls -c ${cluster.name} --output json`, {shell: true})
         cluster.worker_pool = JSON.parse(query.stdout)
         if (cluster.new_cluster) {
+          cluster.tags = []
           ibm_ks_clusters.value.unshift(cluster)
         } else {
-          ibm_ks_clusters.value.splice(ibm_ks_clusters.value.findIndex(c => c.id === cluster.id), 1, cluster)
+          const index = ibm_ks_clusters.value.findIndex(c => c.id === cluster.id)
+          cluster.tags = ibm_ks_clusters.value[index].tags || []
+          ibm_ks_clusters.value.splice(index, 1, cluster)
         }
       } catch (e) { console.error(e) }
     })
@@ -274,6 +279,35 @@ function terminate() {
   }, 60 * 1000)
 }
 
+// function to calculate cluster owner from name and tags
+function owner_of_cluster(cluster) {
+  let owner = "unknown"
+  if (/cicd/i.test(cluster.name)) {
+    owner = "ciddread@us.ibm.com"
+  } else if (/sert/i.test(cluster.name)) {
+    owner = "c3cvt3vm@ca.ibm.com"
+  } else { // from tag
+    if (cluster.hasOwnProperty("tags")) {
+      const tag = cluster.tags.find(t => /^owner:/i.test(t))
+      if (tag) {
+        owner = tag.replace(/owner:/i, "").toLowerCase()
+      }
+    }
+  }
+  return owner
+}
+// function to calculate cluster spending from name and tags
+function spending_of_cluster(cluster) {
+  let spending = "test"
+  if (cluster.hasOwnProperty("tags")) {
+    const tag = cluster.tags.find(t => /^spending_env:/i.test(t))
+    if (tag) {
+      spending = tag.replace(/spending_env:/i, "").toLowerCase()
+    }
+  }
+  return spending
+}
+
 // send slack notifications
 const blocks = computed(() => [
   {
@@ -285,17 +319,17 @@ const blocks = computed(() => [
     text: { type: "mrkdwn", text: `\`\`\`\n${code.value}\n\`\`\`\n` }
   }
 ])
-vcore.watchThrottled(code, () => {
-    console.log(code.value)
-    slack.chat.postMessage({blocks: JSON.stringify(blocks.value), text: text.value, channel: channel.value})
-      .then(() => flag_slack_working.value = true).catch(() => flag_slack_working.value = false)
-  }, { throttle: 1 * 60 * 1000 }
-)
-vcore.watchThrottled(code_status, () => {
-    slack.chat.postMessage({text: code_status.value, channel: channel.value})
-      .then(() => flag_slack_working.value = true).catch(() => flag_slack_working.value = false)
-  }, { throttle: 1 * 1 * 60 * 1000 }
-)
+  vcore.watchThrottled(code, () => {
+      console.log(code.value)
+      slack.chat.postMessage({blocks: JSON.stringify(blocks.value), text: text.value, channel: channel.value})
+        .then(() => flag_slack_working.value = true).catch(() => flag_slack_working.value = false)
+    }, { throttle: 60 * 60 * 1000 }
+  )
+  vcore.watchThrottled(code_status, () => {
+      slack.chat.postMessage({text: code_status.value, channel: channel.value})
+        .then(() => flag_slack_working.value = true).catch(() => flag_slack_working.value = false)
+    }, { throttle: 3 * 60 * 60 * 1000 }
+  )
 
 watch(clusters_notify, () => {
     if (clusters_notify.value.length > 0) {
