@@ -8,7 +8,7 @@ ENV SLACK_MENTION=allevas
 ENV IBM_API_KEY=
 ENV IBM_CLOUD_REGIONS=ca-tor,us-east,us-south,in-che
 
-RUN curl -fsSL https://clis.cloud.ibm.com/install/linux | sh; sleep 20; ibmcloud plugin install ks
+RUN curl -fsSL https://clis.cloud.ibm.com/install/linux | sh; sleep 20; ibmcloud plugin install ks is
 
 WORKDIR /workdir
 COPY Dockerfile .

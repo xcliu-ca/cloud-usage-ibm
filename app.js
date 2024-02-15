@@ -67,7 +67,7 @@ const clusters_notify = computed(() => clusters_active.value
 
 // periodically refresh querys and status
 status().then(() => refresh()).then(() => status())
-const interval_refresh = setInterval(refresh, 10 * 60 * 1000)
+const interval_refresh = setInterval(refresh, 11 * 60 * 1000)
 const interval_status = setInterval(status, 5 * 60 * 1000)
 if (process.env.RUN_ONCE === "yes") { terminate() }
 
@@ -323,12 +323,12 @@ const blocks = computed(() => [
       console.log(code.value)
       slack.chat.postMessage({blocks: JSON.stringify(blocks.value), text: text.value, channel: channel.value})
         .then(() => flag_slack_working.value = true).catch(() => flag_slack_working.value = false)
-    }, { throttle: 60 * 60 * 1000 }
+    }, { throttle: 3 * 60 * 60 * 1000 }
   )
   vcore.watchThrottled(code_status, () => {
       slack.chat.postMessage({text: code_status.value, channel: channel.value})
         .then(() => flag_slack_working.value = true).catch(() => flag_slack_working.value = false)
-    }, { throttle: 3 * 60 * 60 * 1000 }
+    }, { throttle: 5 * 60 * 60 * 1000 }
   )
 
 watch(clusters_notify, () => {
