@@ -5,6 +5,7 @@ const execa = require("execa")
 const chalk = require("chalk")
 const { ref, computed, watch } = require("vue")
 const { WebClient } = require('@slack/web-api')
+const AsyncForEach = require("async-await-foreach")
 // console.log(Object.keys(vmath))
 // console.log(Object.keys(execa))
 
@@ -14,18 +15,20 @@ const MAP_ACTIONS0 = {
   "c3cvt3vm@ca.ibm.com": {mention: "<!subteam^SN8N9QUF9>", notify: 8}, // need group id
   // "unknown@ibm.com": {mention: "<@" + process.env.SLACK_MENTION + ">", notify: 4}
 }
+const REGIONS = (process.env.IBM_CLOUD_REGIONS || "ca-tor,us-east,us-south").split(",")
 const MAP_ACTIONS = Object.assign({}, MAP_ACTIONS0)
 Object.keys(MAP_ACTIONS0).forEach(key => MAP_ACTIONS[key.replace(/@/,"-at-")] = MAP_ACTIONS0[key])
 // reactive variables 
-const ibm_query_ec2 = ref({})
-const ibm_query_vpc = ref({})
-const ibm_query_volume = ref({})
+const ibm_tags = ref([])
+const ibm_query_ec2 = ref({Instances: []})
+const ibm_query_volume = ref({Volumes: []})
 const ibm_query_s3 = ref({})
 const ibm_ec2 = ref({})
 const ibm_vpc = ref({})
 const ibm_volume = ref([])
 const ibm_s3 = ref([])
-const ibm_cost_estimate = ref({Amount: "estimation_cost"})
+const ibm_cost_estimate = ref({resources: {billable_cost: "estimation_cost"}})
+const ibm_ec2_clusters = ref([])
 // global flags
 const flag_ibmcloud_working = ref(false)
 const flag_slack_working = ref(false)
@@ -40,83 +43,41 @@ const text = computed(() => `${subject.value}\n\`\`\`\n${code.value}\n\`\`\`\n`)
 
 // compute ec2 instances
 const ibm_ec2_active = computed(() => Object.values(ibm_ec2.value)
-  .filter(instance => instance.State && instance.State.Name === "running")
+  .filter(instance => instance.status && instance.status === "running")
 )
 
-// compute ec2 clusters
-const ibm_ec2_clusters = computed(() => ibm_ec2_active.value // roks + k8s 
-  .filter(instance => {
-    return instance.Tags.findIndex(tag => tag.Key === "Name" || tag.Key === "name") !== -1 &&
-    (instance.Tags.findIndex(tag => tag.Key === "Owner" || tag.Key === "owner") !== -1 &&
-    instance.Tags.findIndex(tag => tag.Key === "Cluster" || tag.Key === "cluster") !== -1 ||
-    instance.Tags.findIndex(tag => tag.Key === "red-hat-managed") !== -1 ||
-    instance.Tags.findIndex(tag => tag.Key === "eks:cluster-name") !== -1)
-  })
-  .map(instance => {
-    instance.name = instance.Tags.find(tag => tag.Key === "Name" || tag.Key === "name").Value
-    const tag_owner = instance.Tags.find(tag => tag.Key === "Owner" || tag.Key === "owner")
-    const tag_cluster = instance.Tags.find(tag => tag.Key === "Cluster" || tag.Key === "cluster")
-    if (tag_owner && tag_cluster) {
-      instance.owner = tag_owner.Value.replace(/-at-/,"@").toLowerCase()
-      instance.cluster = tag_cluster.Value.toLowerCase()
-    } else if (instance.Tags.findIndex(tag => tag.Key === "red-hat-managed") !== -1) {
-      // rosa cluster
-      if (/cicd-/.test(instance.name)) {
-        instance.owner = (tag_owner?.Value || "cicdread@us.ibm.com").replace(/-at-/,"@").toLowerCase()
-      } else if (/sert-/.test(instance.name)) {
-        instance.owner = (tag_owner?.Value || "c3cvt3vm@ca.ibm.com").replace(/-at-/,"@").toLowerCase()
-      } else {
-        instance.owner = (tag_owner?.Value || "unknown@ibm.com").replace(/-at-/,"@").toLowerCase()
-      }
-      instance.cluster = (tag_cluster?.Value || instance.name.replace(/-infra-.*/,"").replace(/-worker-.*/,"").replace(/-master-.*/,"")).toLowerCase()
-    } else if (instance.Tags.findIndex(tag => tag.Key === "eks:cluster-name") !== -1) {
-      if (/cicd-|prow-/.test(instance.name)) {
-        instance.owner = (tag_owner?.Value || "cicdread@us.ibm.com").toLowerCase()
-      } else if (/sert-/.test(instance.name)) {
-        instance.owner = (tag_owner?.Value || "c3cvt3vm@ca.ibm.com").toLowerCase()
-      } else {
-        instance.owner = (tag_owner?.Value || "unknown@ibm.com").toLowerCase()
-      }
-      instance.cluster = (tag_cluster?.Value || instance.Tags.find(tag => tag.Key === "eks:cluster-name").Value).toLowerCase()
-    } else {
-      instance.owner = (tag_owner?.Value || "unknown@ibm.com").toLowerCase()
-      instance.cluster = (tag_cluster?.Value || "unknown-cluster").toLowerCase()
-    }
-    const tag = instance.Tags.find(tag => tag.Key === "Spending_Env" || tag.Key === "spending_env")
-    if (tag) {
-      instance.spendingenv = tag.Value.toLowerCase()
-    } else {
-      instance.spendingenv = "test"
-    }
-    // console.log(instance)
-    return instance
-  })
-  .sort((x,y) => x.name > y.name ? 1 : -1)
-  .reduce(reduce_cluster, {})
-) 
 // compute all active clusters
-const clusters_active = computed(() => Object.entries(ibm_ec2_clusters.value)
-    .map(([cluster,members]) => ({
-      name: cluster,
-      owner: members.at(0).owner,
-      launch: members.at(0).LaunchTime,
-      vpc: members.at(0).VpcId,
-      type: members.at(0).InstanceType,
-      // owner: members.map(i => i.owner).filter((value, index, array) => array.indexOf(value) === index),
-      // vpc: members.map(i => i.VpcId).filter((value, index, array) => array.indexOf(value) === index),
-      spending: members.at(0).spendingenv,
-      instances: members.length
+const clusters_active = computed(() => {
+  console.log(`... ibm_ec2_clusters changed, calculating clusters active`)
+  ibm_ec2_clusters.value
+    .forEach(cluster => {
+      cluster.spending = cluster.hasOwnProperty("spending_env") ? cluster.spending_env : "test"
+      cluster.owner = cluster.hasOwnProperty("owner") ? cluster.owner : "unknown"
+      cluster.type = cluster.worker_pool.at(0).hasOwnProperty("machineType") ? cluster.worker_pool.at(0).machineType : cluster.worker_pool.at(0).hasOwnProperty("flavor") ? cluster.worker_pool.at(0).flavor : "unknown"
+      cluster.vpc = cluster.worker_pool.at(0).hasOwnProperty("vpcID") ? cluster.worker_pool.at(0).vpcID : "classic"
+      cluster.instances = cluster.hasOwnProperty("workerCount") ? cluster.workerCount : 1
+    })
+  return ibm_ec2_clusters.value
+    .map(cluster => ({
+      name: cluster.name,
+      owner: cluster.owner,
+      launch: cluster.createdDate,
+      vpc: cluster.vpc,
+      type: cluster.type.replace(/.encrypted/i, ""),
+      spending: cluster.spending,
+      instances: cluster.instances
     }))
+  }
 )
 const clusters_notify = computed(() => clusters_active.value
-  .filter(c => c.spending === "test")
   .filter(c => new Date() - new Date(c.launch) > (MAP_ACTIONS.hasOwnProperty(c.owner) ? MAP_ACTIONS[c.owner].notify : 24) * 60 * 60 * 1000)
+  // .filter(c => c.spending === "test")
 )
 
 // periodically refresh querys and status
 status().then(() => refresh()).then(() => status())
-const interval_refresh = setInterval(refresh, 10 * 60 * 1000)
-const interval_status = setInterval(status, 3 * 60 * 1000)
+const interval_refresh = setInterval(refresh, 1 * 60 * 1000)
+const interval_status = setInterval(status, 19 * 1000)
 if (process.env.RUN_ONCE === "yes") { terminate() }
 
 vcore.watchDeep(ibm_vpc, () => {
@@ -128,32 +89,23 @@ watch(ibm_volume, () => {
 watch(ibm_s3, () => {
   console.log(`total buckets: ${ibm_s3.value.length}`)
 })
-vcore.watchDeep(ibm_ec2, () => {
-  console.log(`total ec2 instances: ${Object.keys(ibm_ec2.value).length}`)
-  print_instances()
-  setTimeout(() => console.log(clusters_active.value), 100)
-  // setTimeout(() => Object.values(ibm_ec2.value).forEach(i => console.log(i.Tags.find(t => t.Key === "Name"))), 5000)
-})
+// vcore.watchDeep(ibm_ec2, () => {
+//   console.log(`total ec2 instances: ${Object.keys(ibm_ec2.value).length}`)
+//   print_instances()
+//   setTimeout(() => console.log(clusters_active.value), 100)
+//   // setTimeout(() => Object.values(ibm_ec2.value).forEach(i => console.log(i.Tags.find(t => t.Key === "Name"))), 5000)
+// })
 
-// process aws query results
-watch(ibm_query_vpc, () => {
-  ibm_vpc.value = {}
-  ibm_query_vpc.value["Vpcs"].forEach(vpc => ibm_vpc.value[vpc["VpcId"]] = vpc)
-  // Object.keys(ibm_vpc.value).forEach(key => console.log(key))
-})
-watch(ibm_query_volume, () => {
+// process ibmcloud query results
+vcore.watchDeep(ibm_query_volume, () => {
   ibm_volume.value = ibm_query_volume.value["Volumes"]
 })
 watch(ibm_query_s3, () => {
   ibm_s3.value = ibm_query_s3.value.split('\n')
 })
-watch(ibm_query_ec2, () => {
-  Object.keys(ibm_query_ec2.value).forEach(key => {
-    ibm_query_ec2.value[key].forEach(reservation => {
-      reservation.Instances.forEach(i => {
-        ibm_ec2.value[i.InstanceId] = i
-      })
-    })
+vcore.watchDeep(ibm_query_ec2, () => {
+  ibm_query_ec2.value.Instances.forEach(i => {
+    ibm_ec2.value[i.id] = i
   })
 })
 
@@ -163,7 +115,7 @@ function APIError (code, message) {
   this.message = message || ''
   this.flag_ibmcloud_working = flag_ibmcloud_working.value
   this.flag_slack_working = flag_slack_working.value
-  this.estimated_cost = ibm_cost_estimate.value.Amount
+  this.estimated_cost = ibm_cost_estimate.value.resources.billable_cost
 }
 
 const app = new Koa();
@@ -181,9 +133,11 @@ app.use(async (ctx, next) => {
 app.use(async (ctx, next) => {
   ctx.rest = (data) => {
     ctx.response.body = Object.assign(data, {
-      flag_ibmclou_working: flag_ibmcloud_working.value,
+      flag_ibmcloud_working: flag_ibmcloud_working.value,
       flag_slack_working: flag_slack_working.value,
-      estimated_cost: ibm_cost_estimate.value.Amount
+      estimated_cost: ibm_cost_estimate.value.resources.billable_cost,
+      vpcs: Object.keys(ibm_vpc.value).length,
+      volumes: ibm_volume.value.length
     })
   }
   try {
@@ -195,7 +149,7 @@ app.use(async (ctx, next) => {
       message: e.message || '',
       flag_ibmcloud_working: flag_ibmcloud_working.value,
       flag_slack_working: flag_slack_working.value,
-      estimated_cost: ibm_cost_estimate.value.Amount
+      estimated_cost: ibm_cost_estimate.value.resources.billable_cost
     }
   }
 })
@@ -223,43 +177,92 @@ async function status(url_addr="http://127.0.0.1:3000", timeout=20) {
   try {
     const result = await execa.command('curl localhost:3000', {shell: true})
     console.log(JSON.parse(result.stdout))
+    // console.log(clusters_active.value)
+    console.log(code.value)
+    console.log(code_status.value)
+    console.log(ibm_tags.value)
   } catch (e) {}
 }
 
 // function to refresh with imagecontentsourcepolicy and global pull secret
 async function refresh () {
   console.log(chalk.green(`... refreshing information`))
+  ibm_vpc.value = {}
+  ibm_query_volume.value["Volumes"] = []
+  ibm_query_ec2.value["Instances"] = []
   try {
-    ibm_cost_estimate.value = JSON.parse((await execa.command(`aws ce get-cost-forecast --time-period Start=${new Date().toJSON().replace(/T.*/,"")},End=${new Date(new Date().setFullYear(new Date().getFullYear(), new Date().getMonth() + 1,0)).toJSON().replace(/T.*/,"")} --metric=UNBLENDED_COST --granularity=MONTHLY`, {shell: true})).stdout).Total
+    ibm_cost_estimate.value = JSON.parse((await execa.command(`ibmcloud billing account-usage --output JSON`, {shell: true})).stdout).Summary
+    console.log(ibm_cost_estimate.value)
   } catch (e) {}
+  await AsyncForEach(REGIONS, async (region) => {
+    try {
+      await execa.command(`ibmcloud target -r ${region}`, {shell: true})
+      JSON.parse((await execa.command(`ibmcloud is vpcs --output JSON`, {shell: true})).stdout).forEach(vpc => ibm_vpc.value[vpc.id] = vpc) 
+      JSON.parse((await execa.command('ibmcloud is volumes --output JSON', {shell: true})).stdout).forEach(volume => ibm_query_volume.value.Volumes.push(volume) )
+      JSON.parse((await execa.command('ibmcloud is instances --output JSON', {shell: true})).stdout).forEach(instance => ibm_query_ec2.value.Instances.push(instance) )
+      flag_ibmcloud_working.value = true
+    } catch (e) {
+      flag_ibmcloud_working.value = false
+      console.error(e)
+    }
+  })
+  await async_query_clusters()
+  await async_query_tags()
+  // try {
+  //   ibm_query_s3.value = (await execa.command('aws s3 ls', {shell: true})).stdout.trim()
+  //   flag_ibmcloud_working.value = true
+  // } catch (e) {
+  //   flag_ibmcloud_working.value = false
+  //   console.error(e)
+  // }
+}
+
+// query ibm tags
+const async_query_tags = async () => {
   try {
-    ibm_query_vpc.value = JSON.parse((await execa.command('aws ec2 describe-vpcs', {shell: true})).stdout)
-    flag_ibmcloud_working.value = true
-  } catch (e) {
-    flag_ibmcloud_working.value = false
-    console.error(e)
-  }
+    const q_tags = await execa.command(`ibmcloud resource tags -a true --output json`, {shell: true})
+    const tags = JSON.parse(q_tags.stdout).items.filter(tag => /owner:|spending_env|squad:/.test(tag.name))
+    tags.forEach(tag => tag.new_tag = ibm_tags.value.findIndex(t => t.name === tag.name) === -1)
+    // clean tags
+    ibm_tags.value.forEach(tag => tag.exists = tags.findIndex(t => t.name === tag.name) !== -1)
+    ibm_tags.value = ibm_tags.value.filter(tag => tag.exists)
+    // refresh tags
+    await AsyncForEach(tags, async (tag) => {
+      try {
+        const query = await execa.command(`ibmcloud resource search 'tags:"${tag.name}"' --output json`, {shell: true})
+        tag.items = JSON.parse(query.stdout).items.filter(item => /k8-cluster/.test(item.type))
+        if (tag.new_tag) {
+          ibm_tags.value.unshift(tag)
+        } else {
+          ibm_tags.value.splice(ibm_tags.value.findIndex(t => t.name === tag.name), 1, tag)
+        }
+      } catch (e) { console.error(e) }
+    })
+  } catch (e) { console.log(e) }
+}
+// query ks clusters
+const async_query_clusters = async () => {
   try {
-    ibm_query_volume.value = JSON.parse((await execa.command('aws ec2 describe-volumes', {shell: true})).stdout)
-    flag_ibmcloud_working.value = true
-  } catch (e) {
-    flag_ibmcloud_working.value = false
-    console.error(e)
-  }
-  try {
-    ibm_query_s3.value = (await execa.command('aws s3 ls', {shell: true})).stdout.trim()
-    flag_ibmcloud_working.value = true
-  } catch (e) {
-    flag_ibmcloud_working.value = false
-    console.error(e)
-  }
-  try {
-    ibm_query_ec2.value = JSON.parse((await execa.command('aws ec2 describe-instances', {shell: true})).stdout)
-    flag_ibmcloud_working.value = true
-  } catch (e) {
-    flag_ibmcloud_working.value = false
-    console.error(e)
-  }
+    const q_classic = await execa.command(`ibmcloud ks cluster ls --output json`, {shell: true})
+    const q_vpcgen2 = await execa.command(`ibmcloud ks cluster ls --provider vpc-gen2 --output json`, {shell: true})
+    const q_clusters = JSON.parse(q_classic.stdout).concat(JSON.parse(q_vpcgen2.stdout))
+    q_clusters.forEach(cluster => cluster.new_cluster = ibm_ec2_clusters.value.findIndex(c => c.id === cluster.id) === -1)
+    // clean clusters
+    ibm_ec2_clusters.value.forEach(cluster => cluster.exists = q_clusters.findIndex(c => c.id === cluster.id) !== -1)
+    ibm_ec2_clusters.value = ibm_ec2_clusters.value.filter(cluster => cluster.exists)
+    // refresh clusters
+    await AsyncForEach(q_clusters, async (cluster) => {
+      try {
+        const query = await execa.command(`ibmcloud ks worker-pool ls -c ${cluster.name} --output json`, {shell: true})
+        cluster.worker_pool = JSON.parse(query.stdout)
+        if (cluster.new_cluster) {
+          ibm_ec2_clusters.value.unshift(cluster)
+        } else {
+          ibm_ec2_clusters.value.splice(ibm_ec2_clusters.value.findIndex(c => c.id === cluster.id), 1, cluster)
+        }
+      } catch (e) { console.error(e) }
+    })
+  } catch (e) { console.log(e) }
 }
 
 // reduce instances array to cluster object 
@@ -285,6 +288,17 @@ function print_instances () {
   console.log(ec2s.sort())
 }
 
+// print running iks cluster
+function print_clusters () {
+  const ec2s = []
+  ibm_ec2_active.value.forEach(instance => {
+    const tag_name = instance.Tags.findIndex(tag => tag.Key === "Name" || tag.Key === "name")
+    if (tag_name !== -1) {
+      ec2s.push(instance.Tags[tag_name].Value)
+    }
+  })
+  console.log(ec2s.sort())
+}
 // function terminate the whole app
 function terminate() {
   setTimeout(() => {
@@ -310,17 +324,17 @@ vcore.watchThrottled(code, () => {
     console.log(code.value)
     slack.chat.postMessage({blocks: JSON.stringify(blocks.value), text: text.value, channel: channel.value})
       .then(() => flag_slack_working.value = true).catch(() => flag_slack_working.value = false)
-  }, { throttle: 60 * 60 * 1000 }
+  }, { throttle: 1 * 60 * 1000 }
 )
 vcore.watchThrottled(code_status, () => {
     slack.chat.postMessage({text: code_status.value, channel: channel.value})
       .then(() => flag_slack_working.value = true).catch(() => flag_slack_working.value = false)
-  }, { throttle: 3 * 60 * 60 * 1000 }
+  }, { throttle: 1 * 1 * 60 * 1000 }
 )
 
 watch(clusters_notify, () => {
     if (clusters_notify.value.length > 0) {
-      subject.value = `:warning: long running aws clusters`
+      subject.value = `:warning: long running ibmcloud clusters`
       clusters_notify.value.map(c => c.owner).filter((value, index, array) => array.indexOf(value) === index).forEach(owner => subject.value += ` ${MAP_ACTIONS.hasOwnProperty(owner) ? MAP_ACTIONS[owner].mention : "<@${process.env.SLACK_MENTION}>"} `)
       // code.value = JSON.stringify(clusters_notify.value.map(c => Object.assign({}, c, {launch: vcore.useTimeAgo(new Date(c.launch)).value})), "", 2)
       code.value = clusters_notify.value.map(cluster => cluster.name.padEnd(24) + cluster.owner.padEnd(24) + cluster.spending.padEnd(12) + cluster.instances + " x " + cluster.type.padEnd(16) + vcore.useTimeAgo(new Date(cluster.launch)).value).join("\n")
@@ -329,7 +343,7 @@ watch(clusters_notify, () => {
 
 watch(clusters_active, () => {
   if (clusters_active.value.length > 0) {
-    code_status.value = `:info_2: current active aws clusters [vpcs: ${Object.keys(ibm_vpc.value).length} volumes: ${ibm_volume.value.length} buckets: ${ibm_s3.value.length} estimates :heavy-dollar-sign-emoji:${ibm_cost_estimate.value.Amount.replace(/\..*/,"")}]\n
+    code_status.value = `:info_2: current active ibmcloud clusters [vpcs: ${Object.keys(ibm_vpc.value).length} volumes: ${ibm_volume.value.length} buckets: ${ibm_s3.value.length} estimates :heavy-dollar-sign-emoji:${Math.floor(ibm_cost_estimate.value.resources.billable_cost)}]\n
 \`\`\`
 ${clusters_active.value.map(cluster => cluster.name.padEnd(24) + cluster.owner.padEnd(24) + cluster.spending.padEnd(12) + cluster.instances + " x " + cluster.type.padEnd(16) + vcore.useTimeAgo(new Date(cluster.launch)).value).join("\n")}
 \`\`\`
