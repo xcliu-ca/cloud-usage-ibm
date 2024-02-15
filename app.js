@@ -67,8 +67,8 @@ const clusters_notify = computed(() => clusters_active.value
 
 // periodically refresh querys and status
 status().then(() => refresh()).then(() => status())
-const interval_refresh = setInterval(refresh, 1 * 60 * 1000)
-const interval_status = setInterval(status, 19 * 1000)
+const interval_refresh = setInterval(refresh, 10 * 60 * 1000)
+const interval_status = setInterval(status, 5 * 60 * 1000)
 if (process.env.RUN_ONCE === "yes") { terminate() }
 
 vcore.watchDeep(ibm_vpc, () => {
