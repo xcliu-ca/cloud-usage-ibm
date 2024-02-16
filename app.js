@@ -333,7 +333,7 @@ const blocks = computed(() => [
 
 watch(clusters_notify, () => {
     if (clusters_notify.value.length > 0) {
-      subject.value = `:warning: :ibm_6969: long running ibmcloud clusters`
+      subject.value = `:warning: :ibm-6969: long running ibmcloud clusters`
       clusters_notify.value.map(c => c.owner).filter((value, index, array) => array.indexOf(value) === index).forEach(owner => subject.value += ` ${MAP_ACTIONS.hasOwnProperty(owner) ? MAP_ACTIONS[owner].mention : DEFAULT_MENTION}`)
       // code.value = JSON.stringify(clusters_notify.value.map(c => Object.assign({}, c, {launch: vcore.useTimeAgo(new Date(c.launch)).value})), "", 2)
       code.value = clusters_notify.value.map(cluster => cluster.name.padEnd(24) + cluster.owner.padEnd(24) + cluster.spending.padEnd(12) + cluster.instances + " x " + cluster.type.padEnd(16) + vcore.useTimeAgo(new Date(cluster.launch)).value).join("\n")
@@ -353,7 +353,7 @@ ${clusters_active.value.map(cluster => cluster.name.padEnd(24) + cluster.owner.p
 if (process.env.RUN_ONCE !== "yes") {
   const mcode = JSON.stringify(MAP_ACTIONS0,"", 2).replace(/..subteam./g,"mention-")
   slack.chat.postMessage({
-    text: `:info_2: configuration\n
+    text: `:info_2: :ibm-6969: configuration\n
 \`\`\`
 ${mcode}
 \`\`\`
