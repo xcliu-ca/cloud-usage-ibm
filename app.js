@@ -342,7 +342,7 @@ watch(clusters_notify, () => {
 
 watch(clusters_active, () => {
   if (clusters_active.value.length > 0) {
-    code_status.value = `:info_2: :ibm_6969: current active ibmcloud clusters [vpcs: ${Object.keys(ibm_vpc.value).length} volumes: ${ibm_volume.value.length} estimates :heavy-dollar-sign-emoji:${Math.floor(ibm_cost_estimate.value.resources.billable_cost)}]\n
+    code_status.value = `:info_2: :ibm-6969: current active ibmcloud clusters [vpcs: ${Object.keys(ibm_vpc.value).length} volumes: ${ibm_volume.value.length} estimates :heavy-dollar-sign-emoji:${Math.floor(ibm_cost_estimate.value.resources.billable_cost)}]\n
 \`\`\`
 ${clusters_active.value.map(cluster => cluster.name.padEnd(24) + cluster.owner.padEnd(24) + cluster.spending.padEnd(12) + cluster.instances + " x " + cluster.type.padEnd(16) + vcore.useTimeAgo(new Date(cluster.launch)).value).join("\n")}
 \`\`\`
