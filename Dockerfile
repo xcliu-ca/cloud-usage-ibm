@@ -6,7 +6,7 @@ ENV SLACK_TOKEN=
 ENV SLACK_CHANNEL=#cs-public-cloud-usage
 ENV SLACK_MENTION=allevas
 ENV IBM_API_KEY=
-ENV IBM_CLOUD_REGIONS=ca-tor,us-east,us-south,in-che
+ENV IBM_CLOUD_REGIONS=ca-tor,us-east,us-south
 
 RUN curl -fsSL https://clis.cloud.ibm.com/install/linux | sh; sleep 20; ibmcloud plugin install ks is
 
