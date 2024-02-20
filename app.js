@@ -181,7 +181,13 @@ async function refresh () {
   try {
     ibm_cost_estimate.value.resources.billable_cost = JSON.parse((await execa.command(`ibmcloud billing account-usage --output JSON`, {shell: true})).stdout).Summary.resources.billable_cost * 31 / (new Date().getDate() + 1)
     console.log(ibm_cost_estimate.value)
-  } catch (e) {}
+  } catch (e) {
+    if (e.hasOwnProperty(stderr)) {
+      if (/Not logged in/i.test(e.stderr)) {
+        execa.commandSync(`ibmcloud login --apikey ${process.env.IBM_API_KEY || "apitoken"} --no-region`, {shell: true})
+      }
+    }
+  }
   await AsyncForEach(REGIONS, async (region) => {
     try {
       await execa.command(`ibmcloud target -r ${region}`, {shell: true})
